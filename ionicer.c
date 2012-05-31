@@ -1,5 +1,7 @@
 #include "ionicer.h"
 
+static FILE * log;
+
 void* reader(void *arg) {
   param_t* params = (param_t*) arg;
   int ret;
@@ -69,7 +71,7 @@ void* reader(void *arg) {
     long t1_usec = (100000 * t1.tv_sec) + t1.tv_usec;
     long t2_usec = (100000 * t2.tv_sec) + t2.tv_usec;
     if(params->type == SEEK) {
-      fprintf(stderr, "Seek %ld us\n", t2_usec - t1_usec);
+      fprintf(log, "Seek %ld us\n", t2_usec - t1_usec);
     }
 
     now = time(NULL);
@@ -104,7 +106,7 @@ void lower_priority() {
 void raise_priority() {
   int tid = gettid();
   int new_prio = 0;
-  int new_class = IOPRIO_CLASS_RT;
+  int new_class = IOPRIO_CLASS_BE;
 
   int ret = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(new_class, new_prio));
   if(ret < 0) {
@@ -120,38 +122,48 @@ int main(int argc, char *argv[]) {
 
   int ret;
 
-  /*
   int c;
 
-	while ((c = getopt(argc, argv, "+p:c:t:")) != EOF) {
+  int duration = 60;
+  int seek_priority = 0;
+  char* logfile = NULL;
+
+	while ((c = getopt(argc, argv, "d:o:p")) != EOF) {
 		switch (c) {
+		case 'd':
+		  duration = strtol(optarg, NULL, 10);
+		  break;
+		case 'o':
+		  logfile = optarg;
+		  break;
 		case 'p':
-			new_prio = strtol(optarg, NULL, 10);
-			break;
-		case 'c':
-			new_class = strtol(optarg, NULL, 10);
-			break;
-		case 't':
-			tid = strtol(optarg, NULL, 10);
+			seek_priority = 1;
 			break;
 		}
 	}
-
-	switch (new_class) {
-		case IOPRIO_CLASS_NONE:
-			new_class = IOPRIO_CLASS_BE;
-			break;
-		case IOPRIO_CLASS_RT:
-		case IOPRIO_CLASS_BE:
-			break;
-		case IOPRIO_CLASS_IDLE:
-			new_prio = 7;
-			break;
-		default:
-			printf("bad prio class %d\n", new_class);
-			return 1;
+	char *f1, *f2;
+	if(argc - optind == 2) {
+	  f1 = argv[optind];
+	  f2 = argv[optind+1];
 	}
-	*/
+	else {
+	  printf("Usage: ionicer [-d duration] [-p] scan_file seek_file\n");
+	  return 1;
+	}
+
+	if(logfile == NULL) {
+	  log = stderr;
+    printf("Defaulting to stderr for logging\n");
+	} else {
+	  log = fopen(logfile, "w");
+	  if(log == NULL) {
+	    perror("Cannot open log file");
+	    log = stderr;
+	  }
+	  else {
+      printf("Using %s for logging\n", logfile);
+	  }
+	}
 
   // Start two child threads that do random read and sequential scan
   pthread_t rand_read, rand_scan;
@@ -159,14 +171,14 @@ int main(int argc, char *argv[]) {
   pthread_attr_init(&attrs);
 
   param_t scan_param;
-  scan_param.duration = 30; 
-  scan_param.filename = "/home/andrew/4G.temp";
+  scan_param.duration = duration; 
+  scan_param.filename = f1;
   scan_param.type = SCAN;
   scan_param.priority = 0;
 
   param_t seek_param;
-  seek_param.duration = 30; 
-  seek_param.filename = "/home/andrew/1G.temp";
+  seek_param.duration = duration; 
+  seek_param.filename = f2;
   seek_param.type = SEEK;
   if(argc > 1) {
     seek_param.priority = 1;
