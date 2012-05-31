@@ -180,7 +180,7 @@ int main(int argc, char *argv[]) {
   seek_param.duration = duration; 
   seek_param.filename = f2;
   seek_param.type = SEEK;
-  if(argc > 1) {
+  if(seek_priority) {
     seek_param.priority = 1;
   } else {
     seek_param.priority = 0;
