@@ -106,7 +106,7 @@ void lower_priority() {
 void raise_priority() {
   int tid = gettid();
   int new_prio = 0;
-  int new_class = IOPRIO_CLASS_BE;
+  int new_class = IOPRIO_CLASS_RT;
 
   int ret = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(new_class, new_prio));
   if(ret < 0) {
@@ -147,7 +147,7 @@ int main(int argc, char *argv[]) {
 	  f2 = argv[optind+1];
 	}
 	else {
-	  printf("Usage: ionicer [-d duration] [-p] scan_file seek_file\n");
+	  printf("Usage: ionicer [-d duration] [-o outfile] [-p] scan_file seek_file\n");
 	  return 1;
 	}
 
@@ -166,6 +166,34 @@ int main(int argc, char *argv[]) {
 	}
 
   // Start two child threads that do random read and sequential scan
+  pthread_t threads[5];
+  pthread_attr_t attrs;
+  pthread_attr_init(&attrs);
+
+  param_t boosted_param;
+  boosted_param.duration = duration;
+  boosted_param.filename = f1;
+  boosted_param.type = SEEK;
+  boosted_param.priority = 1;
+
+  param_t worker_param;
+  worker_param.duration = duration;
+  worker_param.filename = f2;
+  worker_param.type = SEEK;
+  worker_param.priority = -1;
+
+  ret = pthread_create(&threads[0], &attrs, reader, (void*)&boosted_param);
+  int i;
+  for(i=1; i<5; i++) {
+    ret = pthread_create(&threads[i], &attrs, reader, (void*)&worker_param);
+  }
+
+  for(i=0; i<5; i++) {
+    pthread_join(threads[i], NULL);
+  }
+
+  /*
+
   pthread_t rand_read, rand_scan;
   pthread_attr_t attrs;
   pthread_attr_init(&attrs);
@@ -192,6 +220,7 @@ int main(int argc, char *argv[]) {
   // Wait for completion
   pthread_join(rand_read, NULL);
   pthread_join(rand_scan, NULL);
+  */
 
   return 0;
 }
