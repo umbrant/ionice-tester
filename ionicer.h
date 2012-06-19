@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -40,7 +42,6 @@ enum {
 };
 
 int main(int argc, char *argv[]);
-void raise_priority();
-void lower_priority();
+void set_priority(int new_prio);
 
 

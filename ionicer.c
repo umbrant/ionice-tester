@@ -7,7 +7,7 @@ void* reader(void *arg) {
   int ret;
   int tid = gettid();
 
-  int fd = open(params->filename, O_RDONLY);
+  int fd = open(params->filename, O_RDONLY|O_DIRECT);
   if(fd == -1) {
     perror("Reader open");
     return;
@@ -20,7 +20,7 @@ void* reader(void *arg) {
   switch(params->type) {
     case SEEK:
       printf("[%d] Doing random reads\n", tid);
-      bufsize = 4*1024;
+      bufsize = 64*1024;
       break;
     case SCAN:
       printf("[%d] Doing random scans\n", tid);
@@ -28,26 +28,31 @@ void* reader(void *arg) {
       break;
   }
 
-  if(params->priority > 0) {
-    raise_priority();
-  }
-  else if(params->priority < 0) {
-    lower_priority();
-  }
+  set_priority(params->priority);
 
-  time_t now = time(NULL);
-  time_t start = now;
-  time_t end = now + params->duration;
+  long start, now, end;
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  start = (1000000*t.tv_sec) + t.tv_usec;
+  end = start + (1000000 * params->duration);
+  now = start;
 
   // IO size
 
-  char buffer[bufsize];
+  char * buffer;
+  ret = posix_memalign((void**)&buffer, 4096, bufsize);
+  if(ret < 0) {
+    printf("ERROR with posix_memalign: %d\n", ret);
+    return;
+  }
   int count = 0;
 
   struct stat st;
   fstat(fd, &st);
   off_t size = st.st_size;
   int blocks = size / bufsize;
+
+  long max_latency = 0;
 
   while(now < end) {
     // Time the I/O
@@ -68,19 +73,30 @@ void* reader(void *arg) {
       total += num_bytes;
     }
     gettimeofday(&t2, NULL);
-    long t1_usec = (100000 * t1.tv_sec) + t1.tv_usec;
-    long t2_usec = (100000 * t2.tv_sec) + t2.tv_usec;
-    if(params->type == SEEK) {
-      fprintf(log, "Seek %ld us\n", t2_usec - t1_usec);
+    long t1_usec = (1000000 * t1.tv_sec) + t1.tv_usec;
+    long t2_usec = (1000000 * t2.tv_sec) + t2.tv_usec;
+    long latency = t2_usec - t1_usec;
+    if(latency > max_latency) {
+        max_latency = latency;
     }
 
-    now = time(NULL);
+    /*
+    if(params->type == SEEK) {
+      fprintf(log, "Seek %ld us\n", latency);
+    }
+    */
+
+    now = t2_usec;
     count++;
   }
 
-  time_t finished = time(NULL);
-  time_t duration = finished - start;
-  printf("[%d] Read ops/s: %.2f\n", gettid(), (float)count / duration);
+  long finished = now;
+  double duration = (double)(finished - start) / 1000.0 / 1000.0;
+  double tput = ((double)count * bufsize) / 1024.0 / duration;
+  fprintf(log, "[%d] Priority: %d, Max latency: %.2f ms, Tput: %.2f KiB/s\n",
+          gettid(), params->priority, (double)max_latency/1000.0, tput);
+
+  free(buffer);
   close(fd);
 }
 
@@ -88,10 +104,9 @@ int gettid() {
   return syscall(SYS_gettid);
 }
 
-void lower_priority() {
+void set_priority(int new_prio) {
   int tid = gettid();
-  int new_prio = 7;
-  int new_class = IOPRIO_CLASS_IDLE;
+  int new_class = IOPRIO_CLASS_BE;
 
   int ret = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(new_class, new_prio));
   if(ret < 0) {
@@ -99,22 +114,7 @@ void lower_priority() {
     perror("ioprio_set");
   }
   else {
-    printf("Lowered priority of thread %d\n", tid);
-  }
-}
-
-void raise_priority() {
-  int tid = gettid();
-  int new_prio = 0;
-  int new_class = IOPRIO_CLASS_RT;
-
-  int ret = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(new_class, new_prio));
-  if(ret < 0) {
-    printf("Error trying to set priority of tid %d\n", tid);
-    perror("ioprio_set");
-  }
-  else {
-    printf("Raised priority of thread %d\n", tid);
+    printf("Set priority of thread %d to %d\n", tid, new_prio);
   }
 }
 
@@ -165,62 +165,27 @@ int main(int argc, char *argv[]) {
 	  }
 	}
 
+  int num_threads = 8;
+
   // Start two child threads that do random read and sequential scan
-  pthread_t threads[5];
-  pthread_attr_t attrs;
-  pthread_attr_init(&attrs);
+  pthread_t threads[num_threads];
+  pthread_attr_t attrs[num_threads];
+  param_t params[num_threads];
 
-  param_t boosted_param;
-  boosted_param.duration = duration;
-  boosted_param.filename = f1;
-  boosted_param.type = SEEK;
-  boosted_param.priority = 1;
-
-  param_t worker_param;
-  worker_param.duration = duration;
-  worker_param.filename = f2;
-  worker_param.type = SEEK;
-  worker_param.priority = -1;
-
-  ret = pthread_create(&threads[0], &attrs, reader, (void*)&boosted_param);
   int i;
-  for(i=1; i<5; i++) {
-    ret = pthread_create(&threads[i], &attrs, reader, (void*)&worker_param);
+  for(i=0; i<num_threads; i++) {
+    params[i].duration = duration;
+    params[i].filename = f1;
+    params[i].type = SEEK;
+    params[i].priority = i;
+
+    pthread_attr_init(&attrs[i]);
+    ret = pthread_create(&threads[i], &attrs[i], reader, (void*)&params[i]);
   }
 
-  for(i=0; i<5; i++) {
+  for(i=0; i<num_threads; i++) {
     pthread_join(threads[i], NULL);
   }
-
-  /*
-
-  pthread_t rand_read, rand_scan;
-  pthread_attr_t attrs;
-  pthread_attr_init(&attrs);
-
-  param_t scan_param;
-  scan_param.duration = duration; 
-  scan_param.filename = f1;
-  scan_param.type = SCAN;
-  scan_param.priority = 0;
-
-  param_t seek_param;
-  seek_param.duration = duration; 
-  seek_param.filename = f2;
-  seek_param.type = SEEK;
-  if(seek_priority) {
-    seek_param.priority = 1;
-  } else {
-    seek_param.priority = 0;
-  }
-
-  ret = pthread_create(&rand_read, &attrs, reader, (void*)&seek_param);
-  ret = pthread_create(&rand_scan, &attrs, reader, (void*)&scan_param);
-
-  // Wait for completion
-  pthread_join(rand_read, NULL);
-  pthread_join(rand_scan, NULL);
-  */
 
   return 0;
 }
